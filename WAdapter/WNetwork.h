@@ -37,6 +37,11 @@ const char* TEXT_PLAIN = "text/plain";
 const char* DEFAULT_TOPIC_STATE = "properties";
 const char* DEFAULT_TOPIC_SET = "set";
 const char* SLASH = "/";
+const char* DEFAULT_SSID = ""; // put your Wifi SSID here
+const char* DEFAULT_PWD = ""; // put your Wifi Password
+const char* DEFAULT_MQTT_SERVER = ""; // put your broker server IP
+const char* DEFAULT_MQTT_USERNAME = ""; // put your MQTT username
+const char* DEFAULT_MQTT_PWD = ""; // put your MQTT password
 
 #ifdef ESP8266
 WiFiEventHandler gotIpEventHandler, disconnectedEventHandler;
@@ -48,7 +53,7 @@ public:
 	typedef std::function<void()> THandlerFunction;
 
 	WNetwork(bool debugging, String applicationName, String firmwareVersion, int statusLedPin, byte appSettingsFlag) {
-		WiFi.disconnect();
+		// WiFi.disconnect();
 		WiFi.mode(WIFI_STA);
 		#ifdef ESP8266
 		WiFi.encryptionType(ENC_TYPE_CCMP);
@@ -136,6 +141,8 @@ public:
 		bool result = true;
 		bool waitForWifiConnection = (deepSleepSeconds > 0);
 		if (!isWebServerRunning()) {
+			
+
 			if (WiFi.status() != WL_CONNECTED) {
 
 				if ((!settings->existsNetworkSettings()) ||
@@ -152,29 +159,33 @@ public:
 					dnsApServer->start(53, "*", WiFi.softAPIP());
 					this->startWebServer();
 				} else if ((wifiConnectTrys < 3) && ((lastWifiConnect == 0) || (now - lastWifiConnect > WIFI_RECONNECTION))) {
-					wifiConnectTrys++;
-					wlog->notice("Connecting to '%s': %d. try", getSsid(), wifiConnectTrys);
-					#ifdef ESP8266
-					//Workaround: if disconnect is not called, WIFI connection fails after first startup
-					WiFi.disconnect();
-					WiFi.hostname(this->hostname);
-					#elif ESP32
-					WiFi.mode(WIFI_STA);
-					WiFi.setHostname(this->hostname);
-					#endif
-					WiFi.begin(getSsid(), getPassword());
-					while ((waitForWifiConnection) && (WiFi.status() != WL_CONNECTED)) {
-						delay(100);
-						if (millis() - now >= 5000) {
-							break;
+					if (strcmp (WiFi.SSID().c_str(),getSsid()) != 0) {
+						wifiConnectTrys++;					
+						wlog->notice("Connecting to '%s': %d. try", getSsid(), wifiConnectTrys);
+						#ifdef ESP8266
+						//Workaround: if disconnect is not called, WIFI connection fails after first startup
+						// WiFi.disconnect();
+						WiFi.hostname(this->hostname);
+						#elif ESP32
+						WiFi.mode(WIFI_STA);
+						WiFi.setHostname(this->hostname);
+						#endif
+						WiFi.begin(getSsid(), getPassword());
+						WiFi.setAutoReconnect(true);
+						while ((waitForWifiConnection) && (WiFi.status() != WL_CONNECTED)) {
+							delay(100);
+							if (millis() - now >= 5000) {
+								break;
+							}
 						}
+						if (wifiConnectTrys == 1) {
+							lastWifiConnectFirstTry = now;
+						}
+						lastWifiConnect = now;
+					} else {
+						wlog->notice("Already connected to '%s'.", getSsid());
 					}
-					if (wifiConnectTrys == 1) {
-						lastWifiConnectFirstTry = now;
-					}
-					lastWifiConnect = now;
 				}
-
 			}
 
 		} else {
@@ -330,9 +341,9 @@ public:
 					std::bind(&WNetwork::handleHttpInfo, this, std::placeholders::_1));
 			webServer->on("/reset", HTTP_GET,
 					std::bind(&WNetwork::handleHttpReset, this, std::placeholders::_1));
-		  webServer->on("/w4StEi18X6", HTTP_ANY,
+		    webServer->on("/w4StEi18X6", HTTP_ANY,
 							std::bind(&WNetwork::handleHttpDoReset, this, std::placeholders::_1));
-		  webServer->on("/w4StEi18X7", HTTP_ANY,
+		    webServer->on("/w4StEi18X7", HTTP_ANY,
 					std::bind(&WNetwork::handleHttpResetNetwork, this, std::placeholders::_1));
 			webServer->on("/w4SEti18X8", HTTP_ANY,
 					std::bind(&WNetwork::handleHttpResetAll, this, std::placeholders::_1));
@@ -573,7 +584,7 @@ private:
 	int deepSleepSeconds;
 	unsigned long startupTime;
 	char body_data[ESP_MAX_PUT_BODY_SIZE];
-  bool b_has_body_data = false;
+  	bool b_has_body_data = false;
 
 	void handleDeviceStateChange(WDevice *device, bool complete) {
 		wlog->notice(F("Device state changed -> send device state..."));
@@ -587,19 +598,29 @@ private:
 
 			if (device->sendCompleteDeviceState()) {
 				//Send all properties of device in one json structure
+
+
+				String availability_topic = String(getMqttBaseTopic());
+			
 				WStringStream* response = getResponseStream();
 				WJson json(response);
 				json.beginObject();
 				if (device->isMainDevice()) {
+					availability_topic.concat(SLASH);
+					availability_topic.concat(device->getId());
+					availability_topic.concat(SLASH);
+					availability_topic.concat("availability");
 					json.propertyString("idx", getIdx());
 					json.propertyString("ip", getDeviceIp().toString().c_str());
-					json.propertyBoolean("alive", true);
 					json.propertyString("firmware", firmwareVersion.c_str());
 				}
 				device->toJsonValues(&json, MQTT);
 				json.endObject();
 
 				mqttClient->publish(topic.c_str(), (const uint8_t*) response->c_str(), response->length(), true);
+
+				// set availability to "online"
+				mqttClient->publish(availability_topic.c_str(), "online", true);
 			} else {
 				//Send every changed property only
 				WProperty* property = device->firstProperty;
@@ -718,20 +739,15 @@ private:
 			this->mqttClient->setServer(getMqttServer(), String(getMqttPort()).toInt());
 			//Create last will message
 			String lastWillTopic = String(getMqttBaseTopic());
-			lastWillTopic.concat(SLASH);
-			WStringStream* lastWillMessage = getResponseStream();
-			WJson json(lastWillMessage);
+			const char* lastWillMessage = "offline";
+			
 			WDevice *device = this->firstDevice;
 			while (device != nullptr) {
 				if (device->isMainDevice()) {
+					lastWillTopic.concat(SLASH);
 					lastWillTopic.concat(device->getId());
 					lastWillTopic.concat(SLASH);
-					lastWillTopic.concat(getMqttStateTopic());
-					json.beginObject();
-					json.propertyString("idx", getIdx());
-					json.propertyString("ip", getDeviceIp().toString().c_str());
-					json.propertyBoolean("alive", false);
-					json.endObject();
+					lastWillTopic.concat("availability");
 				}
 				device = device->next;
 			}
@@ -742,7 +758,7 @@ private:
 				  lastWillTopic.c_str(),
 				  0,
 				  true,
-				  lastWillMessage->c_str())) { //(mqttPassword != "" ? mqttPassword.c_str() : NULL))) {
+				  lastWillMessage)) { //(mqttPassword != "" ? mqttPassword.c_str() : NULL))) {
 				wlog->notice(F("Connected to MQTT server."));
 				if (this->deepSleepSeconds == 0) {
 					//Send device structure and status
@@ -1195,17 +1211,22 @@ private:
 				this->hostname[i] = '-';
 			}
 		}
-		this->ssid = settings->setString("ssid", 32, "");
-		settings->setString("password", 32, "");
+		this->ssid = settings->setString("ssid", 32, DEFAULT_SSID);
+		settings->setString("password", 32, DEFAULT_PWD);
 		this->supportingWebThing = true;
 		this->supportingMqtt = settings->setBoolean("supportingMqtt", true);
-		settings->setString("mqttServer", 32, "");
+		settings->setString("mqttServer", 32, DEFAULT_MQTT_SERVER);
 		settings->setString("mqttPort", 4, "1883");
-		settings->setString("mqttUser", 16, "");
-		settings->setString("mqttPassword", 32, "");
+		settings->setString("mqttUser", 16, DEFAULT_MQTT_USERNAME);
+		settings->setString("mqttPassword", 32, DEFAULT_MQTT_PWD);
+		
 		this->mqttBaseTopic = settings->setString("mqttTopic", 32, getIdx());
 		this->mqttStateTopic = settings->setString("mqttStateTopic", 16, DEFAULT_TOPIC_STATE);
 		this->mqttSetTopic = settings->setString("mqttSetTopic", 16, DEFAULT_TOPIC_SET);
+		// if a SSID is defined, save the settings
+		if (getSsid() != ""){
+			settings->save();
+		}
 		if (settings->existsNetworkSettings()) {
 			if (getMqttBaseTopic() == "") {
 				this->mqttBaseTopic->setString(this->getClientName(true).c_str());

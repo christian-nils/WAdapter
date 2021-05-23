@@ -139,9 +139,9 @@ public:
         return true;
     }
 
-		virtual bool sendCompleteDeviceState() {
-			  return true;
-		}
+	virtual bool sendCompleteDeviceState() {
+			return true;
+	}
 
     virtual void on() {
 
@@ -179,12 +179,12 @@ public:
 	}
 
 	WDevice* next = nullptr;
-  //WebSocketsServer* webSocket;
-  WProperty* firstProperty = nullptr;
-  WProperty* lastProperty = nullptr;
-  WPin* firstPin = nullptr;
-  WPin* lastPin = nullptr;
-  bool lastStateWaitForResponse;
+	//WebSocketsServer* webSocket;
+	WProperty* firstProperty = nullptr;
+	WProperty* lastProperty = nullptr;
+	WPin* firstPin = nullptr;
+	WPin* lastPin = nullptr;
+	bool lastStateWaitForResponse;
 	unsigned long lastStateNotify;
 	unsigned long stateNotifyInterval;
 protected:
