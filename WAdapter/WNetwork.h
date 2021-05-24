@@ -104,14 +104,18 @@ public:
 	}
 
 	void setStatusLedPin(int statusLedPin, bool statusLedOnIfConnected) {
+		this->setStatusLed((statusLedPin != NO_LED ? new WLed(statusLedPin) : nullptr), statusLedOnIfConnected);
+	}
+
+	void setStatusLed(WLed* statusLed, bool statusLedOnIfConnected) {
 		this->statusLedOnIfConnected = statusLedOnIfConnected;
-		if (statusLed != nullptr) {
-			delete statusLed;
+		if (this->statusLed != nullptr) {
+			delete this->statusLed;
 		}
-		statusLed = nullptr;
-		if (statusLedPin != NO_LED) {
-			statusLed = new WLed(statusLedPin);
-			statusLed->setOn(true, 500);
+		this->statusLed = nullptr;
+		if (statusLed != nullptr) {
+			this->statusLed = statusLed;
+			this->statusLed->setOn(true, 500);
 		}
 		this->updateLedState();
 	}
@@ -136,8 +140,15 @@ public:
 		}
 	}
 
+	void startConfiguration() {
+		if (WiFi.status() != WL_CONNECTED) {
+			wifiConnectTrys = WIFI_RECONNECTION_TRYS;
+		}
+	}
+
 	//returns true, if no configuration mode and no own ap is opened
 	bool loop(unsigned long now) {
+		settings->endReadingFirstTime();
 		bool result = true;
 		bool waitForWifiConnection = (deepSleepSeconds > 0);
 		if (!isWebServerRunning()) {
@@ -158,25 +169,22 @@ public:
 					dnsApServer->setErrorReplyCode(DNSReplyCode::NoError);
 					dnsApServer->start(53, "*", WiFi.softAPIP());
 					this->startWebServer();
-				} else if ((wifiConnectTrys < 3) && ((lastWifiConnect == 0) || (now - lastWifiConnect > WIFI_RECONNECTION))) {
-					if (strcmp (WiFi.SSID().c_str(),getSsid()) != 0) {
-						wifiConnectTrys++;					
-						wlog->notice("Connecting to '%s': %d. try", getSsid(), wifiConnectTrys);
-						#ifdef ESP8266
-						//Workaround: if disconnect is not called, WIFI connection fails after first startup
-						// WiFi.disconnect();
-						WiFi.hostname(this->hostname);
-						#elif ESP32
-						WiFi.mode(WIFI_STA);
-						WiFi.setHostname(this->hostname);
-						#endif
-						WiFi.begin(getSsid(), getPassword());
-						WiFi.setAutoReconnect(true);
-						while ((waitForWifiConnection) && (WiFi.status() != WL_CONNECTED)) {
-							delay(100);
-							if (millis() - now >= 5000) {
-								break;
-							}
+				} else if ((wifiConnectTrys < WIFI_RECONNECTION_TRYS) && ((lastWifiConnect == 0) || (now - lastWifiConnect > WIFI_RECONNECTION))) {
+					wifiConnectTrys++;
+					wlog->notice("Connecting to '%s': %d. try", getSsid(), wifiConnectTrys);
+					#ifdef ESP8266
+					//Workaround: if disconnect is not called, WIFI connection fails after first startup
+					WiFi.disconnect();
+					WiFi.hostname(this->hostname);
+					#elif ESP32
+					WiFi.mode(WIFI_STA);
+					WiFi.setHostname(this->hostname);
+					#endif
+					WiFi.begin(getSsid(), getPassword());
+					while ((waitForWifiConnection) && (WiFi.status() != WL_CONNECTED)) {
+						delay(100);
+						if (millis() - now >= 5000) {
+							break;
 						}
 						if (wifiConnectTrys == 1) {
 							lastWifiConnectFirstTry = now;
@@ -327,10 +335,12 @@ public:
 			while (page != nullptr) {
 				String did(SLASH);
 				did.concat(page->getId());
-				webServer->on(did.c_str(), HTTP_GET, std::bind(&WNetwork::handleHttpCustomPage, this, std::placeholders::_1, page));
-				String dis("/submit");
-				dis.concat(page->getId());
-				webServer->on(dis.c_str(), HTTP_GET, std::bind(&WNetwork::handleHttpSubmittedCustomPage, this, std::placeholders::_1, page));
+				webServer->on(did.c_str(), HTTP_ANY, std::bind(&WNetwork::handleHttpCustomPage, this, std::placeholders::_1, page));
+				if (page->hasSubmittedPage()) {
+					String dis("/submit");
+					dis.concat(page->getId());
+					webServer->on(dis.c_str(), HTTP_ANY, std::bind(&WNetwork::handleHttpSubmittedCustomPage, this, std::placeholders::_1, page));
+				}
 				page = page->next;
 			}
 			webServer->on("/wifi", HTTP_GET,
@@ -502,6 +512,10 @@ public:
 			lastPage->next = Page;
 			lastPage = Page;
 		}
+	}
+
+	AsyncWebServer* getWebServer() {
+		return this->webServer;
 	}
 
 	void setDeepSleepSeconds(int dsp) {
@@ -832,7 +846,9 @@ private:
 				page->printf(HTTP_BUTTON, "wifi", "get", "Configure network");
 				WPage *customPage = firstPage;
 				while (customPage != nullptr) {
-					page->printf(HTTP_BUTTON, customPage->getId(), "get", customPage->getTitle());
+					if (customPage->isShowInMainMenu()) {
+						page->printf(HTTP_BUTTON, customPage->getId(), "get", customPage->getTitle());
+					}
 					customPage = customPage->next;
 				}
 				page->printf(HTTP_BUTTON, "firmware", "get", "Update firmware");
@@ -901,7 +917,6 @@ private:
 	}
 
 	void handleHttpSaveConfiguration(AsyncWebServerRequest *request) {
-		settings->saveOnPropertyChanges = false;
 
 		String mbt = request->arg("mt");
 		bool equalsOldIdx = this->idx->equalsString(mbt.c_str());
@@ -933,13 +948,18 @@ private:
 	}
 
 	void handleHttpSubmittedCustomPage(AsyncWebServerRequest *request, WPage *customPage) {
-		wlog->notice(F("Save custom page: %s"), customPage->getId());
-		settings->saveOnPropertyChanges = false;
-		WStringStream* page = new WStringStream(1024);
-		customPage->submittedPage(request, page);
-		settings->save();
-		this->restart(request, (strlen(page->c_str()) == 0 ? "Settings saved." : page->c_str()));
-		delete page;
+		if (customPage->hasSubmittedPage()) {
+			wlog->notice(F("Save custom page: %s"), customPage->getId());
+			WStringStream* page = new WStringStream(1024);
+			customPage->submittedPage(request, page);
+			if (customPage->getTargetAfterSubmitting() != nullptr) {
+				this->handleHttpCustomPage(request, customPage->getTargetAfterSubmitting());
+			} else {
+				settings->save();
+				this->restart(request, (strlen(page->c_str()) == 0 ? "Settings saved." : page->c_str()));
+			}
+			delete page;
+		}
 	}
 
 	void handleHttpInfo(AsyncWebServerRequest *request) {
@@ -1203,7 +1223,7 @@ private:
 	}
 
 	void loadSettings() {
-		this->idx = settings->setString("idx", 16, this->getClientName(true).c_str());
+		this->idx = settings->setString("idx", this->getClientName(true).c_str());
 		this->hostname = new char[strlen(idx->c_str()) + 1];
 		strcpy(this->hostname, idx->c_str());
 		for (int i = 0; i < strlen(this->hostname); i++) {
@@ -1211,22 +1231,17 @@ private:
 				this->hostname[i] = '-';
 			}
 		}
-		this->ssid = settings->setString("ssid", 32, DEFAULT_SSID);
-		settings->setString("password", 32, DEFAULT_PWD);
+		this->ssid = settings->setString("ssid", DEFAULT_SSID);
+		settings->setString("password", DEFAULT_PWD);
 		this->supportingWebThing = true;
 		this->supportingMqtt = settings->setBoolean("supportingMqtt", true);
-		settings->setString("mqttServer", 32, DEFAULT_MQTT_SERVER);
-		settings->setString("mqttPort", 4, "1883");
-		settings->setString("mqttUser", 16, DEFAULT_MQTT_USERNAME);
-		settings->setString("mqttPassword", 32, DEFAULT_MQTT_PWD);
-		
-		this->mqttBaseTopic = settings->setString("mqttTopic", 32, getIdx());
-		this->mqttStateTopic = settings->setString("mqttStateTopic", 16, DEFAULT_TOPIC_STATE);
-		this->mqttSetTopic = settings->setString("mqttSetTopic", 16, DEFAULT_TOPIC_SET);
-		// if a SSID is defined, save the settings
-		if (getSsid() != ""){
-			settings->save();
-		}
+		settings->setString("mqttServer", DEFAULT_MQTT_SERVER);
+		settings->setString("mqttPort", "1883");
+		settings->setString("mqttUser", DEFAULT_MQTT_USERNAME);
+		settings->setString("mqttPassword", DEFAULT_MQTT_PWD);
+		this->mqttBaseTopic = settings->setString("mqttTopic", getIdx());
+		this->mqttStateTopic = settings->setString("mqttStateTopic", DEFAULT_TOPIC_STATE);
+		this->mqttSetTopic = settings->setString("mqttSetTopic", DEFAULT_TOPIC_SET);
 		if (settings->existsNetworkSettings()) {
 			if (getMqttBaseTopic() == "") {
 				this->mqttBaseTopic->setString(this->getClientName(true).c_str());
@@ -1239,7 +1254,6 @@ private:
 		} else {
 			wlog->notice(F("Network settings are missing."));
 		}
-		EEPROM.end();
 		settings->addingNetworkSettings = false;
 	}
 
