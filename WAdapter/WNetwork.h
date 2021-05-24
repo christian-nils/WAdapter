@@ -151,11 +151,9 @@ public:
 		settings->endReadingFirstTime();
 		bool result = true;
 		bool waitForWifiConnection = (deepSleepSeconds > 0);
-		if (!isWebServerRunning()) {
-			
 
+		if (!isWebServerRunning()) {		
 			if (WiFi.status() != WL_CONNECTED) {
-
 				if ((!settings->existsNetworkSettings()) ||
 				    (settings->forceNetworkAccessPoint()) ||
 			      (getSsid() == "") ||
@@ -190,12 +188,9 @@ public:
 							lastWifiConnectFirstTry = now;
 						}
 						lastWifiConnect = now;
-					} else {
-						wlog->notice("Already connected to '%s'.", getSsid());
-					}
+					} 				
 				}
 			}
-
 		} else {
 			if (isSoftAP()) {
 				dnsApServer->processNextRequest();
