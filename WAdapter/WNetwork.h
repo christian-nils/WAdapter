@@ -52,8 +52,8 @@ class WNetwork {
 public:
 	typedef std::function<void()> THandlerFunction;
 
-	WNetwork(bool debugging, String applicationName, String firmwareVersion, int statusLedPin, byte appSettingsFlag) {
-		// WiFi.disconnect();
+	WNetwork(bool debugging, String applicationName, String firmwareVersion, int statusLedPin, byte appSettingsFlag, Print* debuggingOutput = &Serial) {
+		WiFi.disconnect();
 		WiFi.mode(WIFI_STA);
 		#ifdef ESP8266
 		WiFi.encryptionType(ENC_TYPE_CCMP);
@@ -70,7 +70,7 @@ public:
 		this->dnsApServer = nullptr;
 		this->debugging = debugging;
 		this->wlog = new WLog();
-		this->setDebuggingOutput(&Serial);
+		this->setDebuggingOutput(debuggingOutput);
 		this->updateRunning = false;
 		this->restartFlag = "";
 		this->deepSleepFlag = nullptr;
@@ -80,6 +80,9 @@ public:
 		settings = new WSettings(wlog, appSettingsFlag);
 		loadSettings();
 		lastMqttConnect = lastWifiConnect = 0;
+		this->initialMqttSent = false;
+		this->lastWillEnabled = true;
+		this->wifiConnectTrys = 0;
 
 
 		if (this->isSupportingMqtt()) {
@@ -151,8 +154,7 @@ public:
 		settings->endReadingFirstTime();
 		bool result = true;
 		bool waitForWifiConnection = (deepSleepSeconds > 0);
-
-		if (!isWebServerRunning()) {		
+		if (!isWebServerRunning()) {
 			if (WiFi.status() != WL_CONNECTED) {
 				if ((!settings->existsNetworkSettings()) ||
 				    (settings->forceNetworkAccessPoint()) ||
@@ -272,6 +274,7 @@ public:
 	}
 
 	void setDebuggingOutput(Print* output) {
+		this->debuggingOutput = output;
 		this->wlog->setOutput(output, (debugging ? LOG_LEVEL_NOTICE : LOG_LEVEL_SILENT), true, true);
 	}
 
@@ -447,6 +450,18 @@ public:
 		return this->supportingMqtt->getBoolean();
 	}
 
+	bool isInitialMqttSent() {
+		return this->initialMqttSent;
+	}
+
+	bool isLastWillEnabled() {
+		return this->lastWillEnabled;
+	}
+
+	void setLastWillEnabled(bool lastWillEnabled) {
+		this->lastWillEnabled = lastWillEnabled;
+	}
+
 	const char* getIdx() {
 		return this->idx->c_str();
 	}
@@ -547,7 +562,7 @@ public:
 			response->print(QUOTE);
 			this->wlog->setOutput(response, level, false, false);
 			this->wlog->printLevel(level, msg, args...);
-			this->setDebuggingOutput(&Serial);
+			this->setDebuggingOutput(this->debuggingOutput);
 			response->print(QUOTE);
 			json.endObject();
 			publishMqtt(mqttBaseTopic->c_str(), response);
@@ -593,7 +608,10 @@ private:
 	int deepSleepSeconds;
 	unsigned long startupTime;
 	char body_data[ESP_MAX_PUT_BODY_SIZE];
-  	bool b_has_body_data = false;
+  bool b_has_body_data = false;
+	Print* debuggingOutput;
+	bool initialMqttSent;
+	bool lastWillEnabled;
 
 	void handleDeviceStateChange(WDevice *device, bool complete) {
 		wlog->notice(F("Device state changed -> send device state..."));
@@ -621,15 +639,16 @@ private:
 					availability_topic.concat("availability");
 					json.propertyString("idx", getIdx());
 					json.propertyString("ip", getDeviceIp().toString().c_str());
+					if (this->isLastWillEnabled()) {
+						json.propertyBoolean("alive", true);
+					}
 					json.propertyString("firmware", firmwareVersion.c_str());
 				}
 				device->toJsonValues(&json, MQTT);
 				json.endObject();
 
 				mqttClient->publish(topic.c_str(), (const uint8_t*) response->c_str(), response->length(), true);
-
-				// set availability to "online"
-				mqttClient->publish(availability_topic.c_str(), "online", true);
+				initialMqttSent = true;
 			} else {
 				//Send every changed property only
 				WProperty* property = device->firstProperty;
@@ -644,6 +663,9 @@ private:
 						property->setUnChanged();
 					}
 					property = property->next;
+				}
+				if (complete) {
+					initialMqttSent = true;
 				}
 			}
 
@@ -746,28 +768,41 @@ private:
 					   getMqttServer(), getMqttUser(), getMqttPassword(), getClientName(true).c_str());
 			// Attempt to connect
 			this->mqttClient->setServer(getMqttServer(), String(getMqttPort()).toInt());
+			bool connected = false;
 			//Create last will message
-			String lastWillTopic = String(getMqttBaseTopic());
-			const char* lastWillMessage = "offline";
-			
-			WDevice *device = this->firstDevice;
-			while (device != nullptr) {
-				if (device->isMainDevice()) {
-					lastWillTopic.concat(SLASH);
-					lastWillTopic.concat(device->getId());
-					lastWillTopic.concat(SLASH);
-					lastWillTopic.concat("availability");
+			if (this->isLastWillEnabled()) {
+				String lastWillTopic = String(getMqttBaseTopic());
+				lastWillTopic.concat(SLASH);
+				WStringStream* lastWillMessage = getResponseStream();
+				WJson json(lastWillMessage);
+				WDevice *device = this->firstDevice;
+				while (device != nullptr) {
+					if (device->isMainDevice()) {
+						lastWillTopic.concat(device->getId());
+						lastWillTopic.concat(SLASH);
+						lastWillTopic.concat(getMqttStateTopic());
+						json.beginObject();
+						json.propertyString("idx", getIdx());
+						json.propertyString("ip", getDeviceIp().toString().c_str());
+						json.propertyBoolean("alive", false);
+						json.endObject();
+					}
+					device = device->next;
 				}
-				device = device->next;
+				connected = (mqttClient->connect(getClientName(true).c_str(),
+						getMqttUser(), //(mqttUser != "" ? mqttUser.c_str() : NULL),
+						getMqttPassword(),
+					  lastWillTopic.c_str(),
+					  0,
+					  true,
+					  lastWillMessage->c_str()));
+			} else {
+				connected = (mqttClient->connect(getClientName(true).c_str(),
+					getMqttUser(), //(mqttUser != "" ? mqttUser.c_str() : NULL),
+					getMqttPassword()));
 			}
 
-			if (mqttClient->connect(getClientName(true).c_str(),
-					getMqttUser(), //(mqttUser != "" ? mqttUser.c_str() : NULL),
-					getMqttPassword(),
-				  lastWillTopic.c_str(),
-				  0,
-				  true,
-				  lastWillMessage)) { //(mqttPassword != "" ? mqttPassword.c_str() : NULL))) {
+			if (connected) { //(mqttPassword != "" ? mqttPassword.c_str() : NULL))) {
 				wlog->notice(F("Connected to MQTT server."));
 				if (this->deepSleepSeconds == 0) {
 					//Send device structure and status
@@ -792,6 +827,27 @@ private:
 				}
 				//Subscribe to device specific topic
 				mqttClient->subscribe(String(String(getMqttBaseTopic()) + "/#").c_str());
+				WDevice *device = this->firstDevice;
+				while (device != nullptr) {
+					if (device->isMainDevice()) {
+   					        String topic = String(getMqttBaseTopic());
+						topic.concat(SLASH);
+						topic.concat(device->getId());
+						topic.concat(SLASH);
+						topic.concat(getMqttStateTopic());
+						WStringStream* response = getResponseStream();
+						WJson json(response);
+
+						json.beginObject();
+						json.propertyString("idx", getIdx());
+						json.propertyString("ip", getDeviceIp().toString().c_str());
+						json.propertyBoolean("alive", true);
+						json.endObject();
+						mqttClient->publish(topic.c_str(), response->c_str(), false);
+					}
+					device = device->next;
+				}
+
 				notify(false);
 				return true;
 			} else {
@@ -800,7 +856,9 @@ private:
 				notify(false);
 				return false;
 			}
+			initialMqttSent = false;
 		}
+		return false;
 	}
 
 	void updateLedState() {

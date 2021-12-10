@@ -92,10 +92,10 @@ public:
 	~WProperty() {
 		delete this->id;
 		delete this->title;
-		if(this->value.string) {
-		    delete[] this->value.string;
+		if ((type == STRING) && (this->value.string)) {
+		  delete[] this->value.string;
 		}
-		if(this->value.asByteArray) {
+		if ((type == BYTE_ARRAY) && (this->value.asByteArray)) {
 			delete[] this->value.asByteArray;
 		}
 	}
@@ -151,6 +151,7 @@ public:
 				value.asByteArray[i] = 0;
 			}*/
 		}
+		return 0;
 	}
 
 	void setType(WPropertyType type) {
@@ -528,7 +529,10 @@ public:
 			json->propertyByte(memberName, getByte());
 			break;
 		case STRING:
-			json->propertyString(memberName, c_str());
+			if (!onlyValue) 
+			    json->propertyString(memberName, c_str());
+			else 
+			    json->onlyString(c_str());    
 			break;
 		case BYTE_ARRAY:
 			//tbi
@@ -804,6 +808,7 @@ protected:
 		this->onChange = nullptr;
 		this->deviceNotification = nullptr;
 		this->next = nullptr;
+		this->firstEnum = nullptr;
 	}
 
 	void setValue(WPropertyValue newValue) {
@@ -841,7 +846,7 @@ private:
 	bool valueRequesting;
 	bool notifying;
 
-	WProperty* firstEnum = nullptr;
+	WProperty* firstEnum;
 
 	void notify() {
 		if (!valueRequesting) {
